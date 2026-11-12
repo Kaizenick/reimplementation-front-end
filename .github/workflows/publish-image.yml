@@ -1,0 +1,166 @@
+name: Publish frontend container image
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: publish-frontend-image-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  publish:
+    name: Build and publish image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Determine package and release versions
+        id: version
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+
+          package_version=$(node --print "require('./package.json').version")
+          release_tag="v${package_version}"
+          is_release=false
+          tag_exists=false
+
+          VERSION="$package_version" node <<'NODE'
+          const version = process.env.VERSION;
+          const semver = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+          if (!semver.test(version)) {
+            console.error(`package.json contains an invalid semantic version: ${version}`);
+            process.exit(1);
+          }
+          NODE
+
+          if [[ ! "$BEFORE_SHA" =~ ^0+$ ]] && git cat-file -e "${BEFORE_SHA}:package.json" 2>/dev/null; then
+            previous_version=$(git show "${BEFORE_SHA}:package.json" | node -e '
+              let input = "";
+              process.stdin.setEncoding("utf8");
+              process.stdin.on("data", chunk => input += chunk);
+              process.stdin.on("end", () => console.log(JSON.parse(input).version));
+            ')
+
+            if [[ "$package_version" != "$previous_version" ]]; then
+              is_release=true
+            fi
+          fi
+
+          if [[ "$is_release" == "true" ]] && git rev-parse --verify --quiet "refs/tags/${release_tag}" >/dev/null; then
+            tagged_sha=$(git rev-list -n 1 "$release_tag")
+            if [[ "$tagged_sha" != "$GITHUB_SHA" ]]; then
+              echo "Release tag ${release_tag} already points to ${tagged_sha}, not ${GITHUB_SHA}." >&2
+              exit 1
+            fi
+            tag_exists=true
+          fi
+
+          {
+            echo "package_version=$package_version"
+            echo "release_tag=$release_tag"
+            echo "is_release=$is_release"
+            echo "tag_exists=$tag_exists"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image tags and labels
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ steps.version.outputs.release_tag }},enable=${{ steps.version.outputs.is_release == 'true' }}
+
+      - name: Build and publish frontend image
+        id: publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub release
+        if: steps.version.outputs.is_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+          TAG_EXISTS: ${{ steps.version.outputs.tag_exists }}
+        run: |
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GitHub release $RELEASE_TAG already exists."
+          elif [[ "$TAG_EXISTS" == "true" ]]; then
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "Frontend $RELEASE_TAG" \
+              --generate-notes
+          else
+            gh release create "$RELEASE_TAG" \
+              --target "$GITHUB_SHA" \
+              --title "Frontend $RELEASE_TAG" \
+              --generate-notes
+          fi
+
+      - name: Add publication summary
+        env:
+          IMAGE_TAGS: ${{ steps.metadata.outputs.tags }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          IS_RELEASE: ${{ steps.version.outputs.is_release }}
+          RELEASE_TAG: ${{ steps.version.outputs.release_tag }}
+        run: |
+          {
+            echo "## Published frontend container image"
+            echo
+            echo "### Tags"
+            echo '```text'
+            echo "$IMAGE_TAGS"
+            echo '```'
+            echo
+            echo "**Digest:** \`$IMAGE_DIGEST\`"
+            if [[ "$IS_RELEASE" == "true" ]]; then
+              echo
+              echo "**Release:** \`$RELEASE_TAG\` (from \`package.json\`)"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
