@@ -1,6 +1,6 @@
 {
   "name": "expertiza_frontend",
-  "version": "0.2.0-test.1",
+  "version": "0.2.1-test.1",
   "private": true,
   "dependencies": {
     "@fortawesome/fontawesome-svg-core": "^6.5.1",
