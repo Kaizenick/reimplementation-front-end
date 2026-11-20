@@ -218,8 +218,10 @@ npm run preview
 
 ## Docker
 
-The Dockerfile uses a multi-stage build. Node.js and `npm ci` create the Vite production assets,
-and Nginx serves those assets with single-page-application routing support.
+The Dockerfile supports two build paths. A normal local build uses Node.js and `npm ci` to create the
+Vite production assets, then Nginx serves those assets with single-page-application routing support.
+CI uses the `prebuilt` target to package an existing `dist` directory without reinstalling frontend
+dependencies inside each platform-specific container build.
 
 Build the image:
 
@@ -251,18 +253,22 @@ docker stop expertiza-frontend-local
 If port 8080 is already in use, publish another local port, such as `--publish 8081:80`, and open
 `http://localhost:8081` instead.
 
-You can also build and run the service defined in `docker-compose.yml`:
+You can also build and run the local service defined in `docker-compose.yml`:
 
 ```bash
-docker compose up --build
+docker compose --profile local up --build
 ```
+
+Stop the Compose service with `docker compose --profile local down`.
 
 ### Published container image
 
-The `Publish frontend container image` GitHub Actions workflow builds the existing `Dockerfile` and
-publishes the resulting image to GitHub Container Registry after a push to `main`. Versioned releases
-are prepared on maintained `release/<version>` branches, and `package.json` is the source of truth
-for the release version.
+The `Publish frontend container image` GitHub Actions workflow runs `npm ci` and `npm run build` once
+on its Ubuntu runner, uploads `dist` as a short-lived workflow artifact, and packages those same
+assets into the AMD64 and ARM64 Nginx images. This avoids running the Node.js build under emulation
+for each container platform. The resulting image is published to GitHub Container Registry after a
+push to `main`. Versioned releases are prepared on maintained `release/<version>` branches, and
+`package.json` is the source of truth for the release version.
 
 The published image name is:
 
@@ -411,6 +417,20 @@ docker run --detach --rm \
   ghcr.io/expertiza/reimplementation-front-end:latest
 ```
 
+For a production deployment, use the `prod` Compose profile and select an immutable version tag.
+The host only needs `docker-compose.yml` and permission to pull the image; it does not need Node.js
+or the frontend source code:
+
+```bash
+export EXPERTIZA_FRONTEND_IMAGE=ghcr.io/expertiza/reimplementation-front-end:v0.2.0
+docker compose --profile prod pull
+docker compose --profile prod up --detach
+```
+
+If `EXPERTIZA_FRONTEND_IMAGE` is omitted, the profile uses `latest`. An explicit `v<version>` tag is
+recommended for production so the deployed image does not change unexpectedly. Stop the production
+service with `docker compose --profile prod down`.
+
 Package visibility is managed in the GitHub Container Registry settings. Authentication with an
 account that can read the package is required when the image is private.
 
@@ -433,5 +453,6 @@ failure in one check does not prevent the remaining checks from reporting their 
 Container publishing is handled separately by `.github/workflows/publish-image.yml`. It uses the
 temporary `GITHUB_TOKEN` supplied by GitHub Actions with `packages: write` permission to publish the
 image and `contents: write` permission to create version tags and GitHub Releases. No long-lived
-registry password is stored in the repository. Pull requests continue to build the Docker image for
-validation but do not publish it.
+registry password is stored in the repository. The production-build job uploads its `dist` directory
+for the Docker-validation job, so pull requests validate the same prebuilt-assets path used for
+publication. Pull requests do not publish the image.

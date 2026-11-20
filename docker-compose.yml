@@ -1,14 +1,24 @@
+x-frontend-common: &frontend-common
+  ports:
+    - "8080:80"
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
 services:
-  frontend:
+  frontend-local:
+    <<: *frontend-common
+    profiles: ["local"]
     build:
       context: .
       dockerfile: Dockerfile
     container_name: expertiza-frontend
-    ports:
-      - "8080:80"
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+
+  frontend-prod:
+    <<: *frontend-common
+    profiles: ["prod"]
+    image: ${EXPERTIZA_FRONTEND_IMAGE:-ghcr.io/expertiza/reimplementation-front-end:latest}
+    container_name: expertiza-frontend-prod

@@ -1,42 +1,32 @@
-# Multi-stage build for Vite React application
+# Shared nginx runtime used by both build paths.
+FROM nginx:alpine-slim AS runtime
 
-# Stage 1: Build the application
-FROM node:24-alpine AS builder
+COPY nginx.conf /etc/nginx/conf.d/default.conf
 
-# Set working directory
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]
+
+# CI builds the Vite assets once on the runner and uses this target to
+# package the prebuilt dist directory for every requested platform.
+FROM runtime AS prebuilt
+
+COPY dist/ /usr/share/nginx/html/
+
+# A self-contained source build remains available for local development.
+FROM node:24-alpine AS source-builder
+
 WORKDIR /app
 
-# Copy package files
 COPY package*.json ./
-
-# Install dependencies
 RUN npm ci
 
-# Copy source code
 COPY . .
-
-# Build the application
 RUN npm run build
 
-# Stage 2: Serve the application with nginx
-FROM nginx:alpine-slim
+FROM runtime AS source-built
 
-# Copy built assets from builder stage
-COPY --from=builder /app/dist /usr/share/nginx/html
+COPY --from=source-builder /app/dist/ /usr/share/nginx/html/
 
-# Copy nginx configuration (optional - for SPA routing)
-RUN echo 'server { \
-    listen 80; \
-    server_name localhost; \
-    root /usr/share/nginx/html; \
-    index index.html; \
-    location / { \
-        try_files $uri $uri/ /index.html; \
-    } \
-}' > /etc/nginx/conf.d/default.conf
-
-# Expose port 80
-EXPOSE 80
-
-# Start nginx
-CMD ["nginx", "-g", "daemon off;"]
+# Keep `docker build .` backward-compatible by selecting the source-built
+# image when no explicit target is supplied.
+FROM source-built AS final

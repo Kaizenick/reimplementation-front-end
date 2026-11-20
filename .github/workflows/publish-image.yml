@@ -102,9 +102,38 @@ jobs:
             echo "is_prerelease=$is_prerelease"
           } >> "$GITHUB_OUTPUT"
 
+  build-assets:
+    name: Build frontend assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Upload production assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     name: Build and publish image
-    needs: prepare
+    needs: [prepare, build-assets]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     concurrency:
@@ -120,6 +149,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Download production assets
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist-${{ github.sha }}
+          path: dist
 
       - name: Reserve remote Git tag for this commit
         if: needs.prepare.outputs.is_release == 'true'
@@ -169,9 +204,6 @@ jobs:
 
           echo "Release tag ${RELEASE_TAG} was concurrently reserved for this commit."
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -198,6 +230,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          target: prebuilt
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.metadata.outputs.tags }}
